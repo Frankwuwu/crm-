@@ -19,52 +19,54 @@ st.set_page_config(
 def inject_custom_css():
     st.markdown("""
     <style>
-        /* Main Container Background */
-        .stApp {
-            background-color: #f8f9fa;
-        }
+        /* Use Streamlit's default background to ensure text contrast compatibility */
         
-        /* Metric Cards */
+        /* Metric Cards - Glassmorphism */
         div[data-testid="metric-container"] {
-            background-color: #ffffff;
-            border: 1px solid #e0e0e0;
-            padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-            transition: transform 0.2s;
+            background-color: rgba(28, 131, 225, 0.1);
+            border: 1px solid rgba(28, 131, 225, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            transition: all 0.3s ease;
         }
         div[data-testid="metric-container"]:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 12px rgba(0,0,0,0.1);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            border-color: rgba(28, 131, 225, 0.3);
         }
         
-        /* Headers */
+        /* Headers - Gradient Text */
         h1, h2, h3 {
-            color: #2c3e50;
             font-family: 'Helvetica Neue', sans-serif;
+            font-weight: 700 !important;
         }
         
-        /* Tabs */
+        h1 {
+            background: linear-gradient(45deg, #FF6B6B, #4ECDC4);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            /* Fallback for browsers that don't support clip */
+            color: #FF6B6B; 
+        }
+
+        /* Tabs - Pills Design */
         .stTabs [data-baseweb="tab-list"] {
             gap: 10px;
             background-color: transparent;
         }
         .stTabs [data-baseweb="tab"] {
             height: 45px;
-            background-color: #ffffff;
-            border-radius: 8px 8px 0 0;
-            border: 1px solid #e0e0e0;
-            border-bottom: none;
+            border-radius: 20px;
             padding: 0 20px;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+        }
+        .stTabs [data-baseweb="tab"]:hover {
+            background-color: rgba(150, 150, 150, 0.1);
         }
         .stTabs [data-baseweb="tab"][aria-selected="true"] {
-            background-color: #6c5ce7;
-            color: white;
-        }
-        
-        /* Sidebar */
-        .css-1d391kg {
-            padding-top: 2rem;
+            background-color: #FF6B6B;
+            color: white !important;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -135,8 +137,8 @@ def calculate_rfm(df, end_date=None):
             rfm['M_Score'] = pd.qcut(rfm['Monetary'], 5, labels=[1, 2, 3, 4, 5])
             rfm['RFM_Segment'] = rfm['R_Score'].astype(str) + rfm['F_Score'].astype(str) + rfm['M_Score'].astype(str)
             rfm['RFM_Score'] = rfm[['R_Score', 'F_Score', 'M_Score']].sum(axis=1)
-        except Exception as e:
-            st.warning("Data insufficient for quintile scoring, using simplified logic.")
+        except Exception:
+            # Fallback if specific quantiles fail
             rfm['R_Score'] = 3
             rfm['F_Score'] = 3
             rfm['M_Score'] = 3
@@ -235,7 +237,6 @@ def main():
     total_members = df_filtered['會員'].nunique()
     avg_order_value = total_rev / total_orders if total_orders else 0
     
-    # Comparison (Fake YoY for demo if only 1 year, else real calc could be added)
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("年度總營收", f"${total_rev:,.0f}", delta="累積")
     col2.metric("總訂單數", f"{total_orders:,}", delta="筆")
@@ -246,11 +247,11 @@ def main():
 
     # --- Tabs ---
     tabs = st.tabs([
-        "📈 營運概覽 (Overview)", 
-        "👥 會員深度分析 (RFM)", 
-        "🔄 留存與回購 (Retention)", 
-        "🛍️ 產品矩陣 (Products)",
-        "🎁 促銷成效 (Promotions)"
+        "📈 營運概覽", 
+        "👥 會員深度分析", 
+        "🔄 留存與回購", 
+        "🛍️ 產品矩陣",
+        "🎁 促銷成效"
     ])
     
     # 1. Overview
@@ -260,12 +261,10 @@ def main():
         
         c1, c2 = st.columns(2)
         with c1:
-            # Monthly Revenue
             monthly_rev = df_filtered.groupby('月份')['總價'].sum().reset_index()
             fig_mon = px.bar(monthly_rev, x='月份', y='總價', title='月度營收表現', color='總價', color_continuous_scale='Bluyl')
             st.plotly_chart(fig_mon, use_container_width=True)
         with c2:
-            # Hourly/Daily patterns (if time available) or Pay methods
             if '消費方式' in df_filtered.columns:
                 pay_mix = df_filtered.groupby('消費方式')['總價'].sum().reset_index()
                 fig_pay = px.pie(pay_mix, values='總價', names='消費方式', title='支付方式佔比', hole=0.4)
@@ -287,7 +286,6 @@ def main():
             - **Monetary (M)**: 消費金額 (越大越好)
             """)
             
-            # Show Top VIPs
             st.markdown("#### 🏆 Top 10 超級 VIP")
             st.dataframe(
                 rfm_df.sort_values('Monetary', ascending=False).head(10)[['會員', 'Recency', 'Frequency', 'Monetary']],
@@ -301,9 +299,8 @@ def main():
         st.caption("觀察不同月份加入的會員，隨著時間推移的留存情況")
         
         try:
-            retention_matrix, cohort_size = calculate_cohort(df) # Use full data for cohort to see long term
+            retention_matrix, cohort_size = calculate_cohort(df)
             
-            # Heatmap
             fig_cohort = go.Figure(data=go.Heatmap(
                 z=retention_matrix.values,
                 x=retention_matrix.columns,
@@ -324,7 +321,6 @@ def main():
             
         except Exception as e:
             st.warning("資料量不足或格式問題，無法產生留存分析圖表")
-            st.error(str(e))
 
     # 4. Products (BCG)
     with tabs[3]:
@@ -337,7 +333,6 @@ def main():
             }).reset_index()
             prod_stats.columns = ['品項', '銷量', '營收']
             
-            # Median thresholds
             sales_med = prod_stats['銷量'].median()
             rev_med = prod_stats['營收'].median()
             
@@ -372,8 +367,8 @@ def _show_landing_page():
     st.markdown("""
     <div style='text-align: center; padding: 50px;'>
         <h1>👋 歡迎使用 Pro Beauty CRM</h1>
-        <p style='font-size: 1.2em; color: #666;'>請從左側欄位上傳您的交易資料 (CSV/Excel) 以開始分析</p>
-        <div style='background-color: #e3f2fd; padding: 20px; border-radius: 10px; display: inline-block; text-align: left;'>
+        <p style='font-size: 1.2em; opacity: 0.7;'>請從左側欄位上傳您的交易資料 (CSV/Excel) 以開始分析</p>
+        <div style='background-color: rgba(60, 150, 255, 0.1); padding: 20px; border-radius: 10px; display: inline-block; text-align: left; border: 1px solid rgba(60, 150, 255, 0.2);'>
             <strong>📋 資料格式需求：</strong><br>
             您的檔案應包含以下欄位：<br>
             - <code>訂單號碼</code> (Order ID)<br>
