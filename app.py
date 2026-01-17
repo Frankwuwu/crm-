@@ -29,6 +29,211 @@ st.markdown("""
 
 st.title("💅 美業 CRM 數據分析系統")
 
+# ========== 資料需求說明（首次進入顯示）==========
+if 'files_uploaded' not in st.session_state:
+    st.session_state['files_uploaded'] = False
+
+if not st.session_state['files_uploaded']:
+    st.info("""
+    ### 📋 資料需求說明
+    
+    為了進行完整的 CRM 分析，您的資料檔案**最少需要包含**以下欄位：
+    
+    #### ✅ 核心必須欄位（沒有這些無法分析）
+    - **訂單號碼**：用於識別每筆訂單
+    - **訂單時間**：用於年度、月度趨勢分析
+    - **會員**：會員名稱或 ID（最重要！用於計算交易次數）
+    - **品項**：商品或服務名稱（用於商品歸因分析）
+    - **總價** 或 **實收金額**：營收計算
+    
+    #### 🌟 進階分析欄位（有這些分析更完整）
+    - **分類**：商品大分類（例如：皮膚管理、專業美體淨毛）
+    - **消費方式** 或 **銷售方案**：例如「買3送1」、「單次」、「商品券」
+    - **支付方式**：現金、匯款、LINE Pay 等
+    - **客群狀態**：🟢 活躍中、🟡 需喚醒、🔴 已流失（如果沒有，系統會自動計算）
+    
+    #### 📊 可進行的分析功能對照表
+    
+    | 功能模組 | 最少需要欄位 | 加分欄位 |
+    |---------|------------|----------|
+    | 會員深度分析 | 訂單號碼、訂單時間、會員、總價 | 品項、分類 |
+    | 會員黏著度分析 | 訂單號碼、會員 | - |
+    | 產品矩陣分析 | 品項、訂單號碼、總價 | 分類 |
+    | 客群健康度雷達 | 會員、訂單時間 | 分類、客群狀態 |
+    | 促銷方案成效 | 品項、總價 | 消費方式、銷售方案 |
+    
+    ---
+    
+    ### ⚠️ 資料不足時的影響
+    
+    如果缺少進階欄位，部分圖表會顯示警示訊息，例如：
+    - 缺少「分類」→ 無法進行客群健康度診斷
+    - 缺少「消費方式」→ 無法分析促銷方案成效
+    - 缺少「品項」→ 無法找出帶路雞與毒藥商品
+    
+    但核心的「會員分佈」和「交易次數分析」仍然可以正常運行！
+    """)
+
+# ========== 側邊欄：多檔案上傳 ==========
+st.sidebar.header("📁 資料上傳")
+uploaded_files = st.sidebar.file_uploader(
+    "上傳交易資料 (可選擇 10-20 個檔案)", 
+    type=['xlsx', 'csv', 'parquet'],
+    accept_multiple_files=True
+)
+
+if uploaded_files:
+    st.session_state['files_uploaded'] = True
+    
+    # 合併所有上傳的檔案
+    all_dfs = []
+    
+    with st.spinner('正在讀取並合併檔案...'):
+        for uploaded_file in uploaded_files:
+            try:
+                if uploaded_file.name.endswith('.csv'):
+                    df_temp = pd.read_csv(uploaded_file)
+                elif uploaded_file.name.endswith('.parquet'):
+                    df_temp = pd.read_parquet(uploaded_file)
+                else:
+                    df_temp = pd.read_excel(uploaded_file)
+                
+                all_dfs.append(df_temp)
+                st.sidebar.success(f"✅ {uploaded_file.name} ({len(df_temp):,} 筆)")
+            except Exception as e:
+                st.sidebar.error(f"❌ {uploaded_file.name} 讀取失敗：{str(e)}")
+    
+    # 合併所有資料
+    df = pd.concat(all_dfs, ignore_index=True)
+    
+    # ========== 資料完整度檢查 ==========
+    required_fields = {
+        '訂單號碼': ['訂單號碼', 'order_id', 'OrderID'],
+        '訂單時間': ['訂單時間', 'order_time', 'OrderTime', '建立時間'],
+        '會員': ['會員', 'member', 'Member', '會員名稱', '客戶'],
+        '品項': ['品項', 'item', 'Item', '商品', '服務項目'],
+        '總價': ['總價', 'price', 'Price', '實收', '金額', '實收金額']
+    }
+    
+    optional_fields = {
+        '分類': ['分類', 'category', 'Category', '大分類'],
+        '消費方式': ['消費方式', 'payment_type', '銷售方案', '方案'],
+        '支付方式': ['支付方式', 'payment_method', '付款方式'],
+        '客群狀態': ['客群狀態', 'customer_status', '會員狀態']
+    }
+    
+    # 檢查並標準化欄位名稱
+    field_mapping = {}
+    missing_required = []
+    missing_optional = []
+    
+    for standard_name, possible_names in required_fields.items():
+        found = False
+        for possible_name in possible_names:
+            if possible_name in df.columns:
+                field_mapping[possible_name] = standard_name
+                found = True
+                break
+        if not found:
+            missing_required.append(standard_name)
+    
+    for standard_name, possible_names in optional_fields.items():
+        found = False
+        for possible_name in possible_names:
+            if possible_name in df.columns:
+                field_mapping[possible_name] = standard_name
+                found = True
+                break
+        if not found:
+            missing_optional.append(standard_name)
+    
+    # 重命名欄位
+    df = df.rename(columns=field_mapping)
+    
+    # 顯示資料完整度檢查結果
+    st.success(f"✅ 成功合併 {len(uploaded_files)} 個檔案，共 {len(df):,} 筆交易資料")
+    
+    with st.expander("📊 資料完整度檢查報告", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("✅ 必須欄位")
+            if len(missing_required) == 0:
+                st.success("**所有必須欄位都存在！可以進行核心分析**")
+                for field in required_fields.keys():
+                    st.write(f"- ✅ {field}")
+            else:
+                st.error(f"**缺少 {len(missing_required)} 個必須欄位**")
+                for field in required_fields.keys():
+                    if field in missing_required:
+                        st.write(f"- ❌ {field}")
+                    else:
+                        st.write(f"- ✅ {field}")
+        
+        with col2:
+            st.subheader("🌟 進階欄位")
+            if len(missing_optional) == 0:
+                st.success("**所有進階欄位都存在！可以進行完整分析**")
+            else:
+                st.warning(f"**缺少 {len(missing_optional)} 個進階欄位，部分功能受限**")
+            
+            for field in optional_fields.keys():
+                if field in missing_optional:
+                    st.write(f"- ⚠️ {field}（部分功能受限）")
+                else:
+                    st.write(f"- ✅ {field}")
+    
+    # 如果缺少必須欄位，停止執行
+    if len(missing_required) > 0:
+        st.error(f"""
+        ❌ **無法進行分析**
+        
+        您的資料缺少以下必須欄位：{', '.join(missing_required)}
+        
+        請確保資料包含：訂單號碼、訂單時間、會員、品項、總價
+        """)
+        st.stop()
+    
+    # 資料預處理
+    df['訂單時間'] = pd.to_datetime(df['訂單時間'], errors='coerce')
+    df['年份'] = df['訂單時間'].dt.year
+    df['月份'] = df['訂單時間'].dt.month
+    
+    # 計算每個會員的年度總次數
+    member_annual_freq = df.groupby(['會員', '年份'])['訂單號碼'].nunique().reset_index()
+    member_annual_freq.columns = ['會員', '年份', '年度總次數']
+    df = df.merge(member_annual_freq, on=['會員', '年份'], how='left')
+    
+    # 如果沒有「客群狀態」欄位，自動計算
+    if '客群狀態' in missing_optional:
+        st.info("💡 系統自動計算「客群狀態」欄位（根據最後購買時間）")
+        latest_purchase = df.groupby('會員')['訂單時間'].max().reset_index()
+        latest_purchase.columns = ['會員', '最後購買時間']
+        today = pd.Timestamp.now()
+        
+        def calculate_status(last_purchase_date):
+            if pd.isna(last_purchase_date):
+                return '🔴 已流失'
+            days_since = (today - last_purchase_date).days
+            if days_since <= 90:
+                return '🟢 活躍中'
+            elif days_since <= 180:
+                return '🟡 需喚醒'
+            else:
+                return '🔴 已流失'
+        
+        latest_purchase['客群狀態'] = latest_purchase['最後購買時間'].apply(calculate_status)
+        df = df.merge(latest_purchase[['會員', '客群狀態']], on='會員', how='left')
+    
+    # 選擇分析年度
+    years = sorted(df['年份'].dropna().unique())
+    selected_year = st.sidebar.selectbox("選擇分析年度", years, index=len(years)-1)
+    
+    # ... 接下來是原本的分析邏輯（保持不變）
+
+
+st.title("💅 美業 CRM 數據分析系統")
+
 # ========== 側邊欄：多檔案上傳 ==========
 st.sidebar.header("📁 資料上傳")
 uploaded_files = st.sidebar.file_uploader(
