@@ -101,18 +101,103 @@ def load_data(uploaded_files):
 def preprocess_data(df):
     df = df.copy()
     
-    # Ensure datetime
+    # 1. Basic Type Conversion
     if '訂單時間' in df.columns:
         df['訂單時間'] = pd.to_datetime(df['訂單時間'], errors='coerce')
+        df['消費日期'] = df['訂單時間'].dt.date
         df['年份'] = df['訂單時間'].dt.year
         df['月份'] = df['訂單時間'].dt.month
         df['月份名稱'] = df['訂單時間'].dt.strftime('%Y-%m')
-        df['日期'] = df['訂單時間'].dt.date
-    
-    # Ensure numeric
+
     if '總價' in df.columns:
-        df['總價'] = pd.to_numeric(df['總價'], errors='coerce').fillna(0)
+        df['總價'] = pd.to_numeric(df['總價'], errors='coerce').fillna(0) # Standardize price
+    
+    # 2. Advanced Fields Generation (The "Cleaning" Request)
+    
+    # (A) MemberID: Name + Phone
+    if '會員' in df.columns and '手機' in df.columns:
+        df['會員ID'] = df['會員'].astype(str) + "_" + df['手機'].astype(str)
+    elif '會員' in df.columns:
+        df['會員ID'] = df['會員']
+    else:
+        df['會員ID'] = 'Unknown'
+
+    # (B) Visit Sort Order
+    df = df.sort_values(['會員ID', '訂單時間'])
+    df['第幾次來'] = df.groupby('會員ID').cumcount() + 1
+    
+    # (C) Annual Frequency
+    annual_freq = df.groupby(['會員ID', '年份']).size().reset_index(name='年度總次數')
+    df = df.merge(annual_freq, on=['會員ID', '年份'], how='left')
+
+    # (D) Parsing Item & Scheme from '品項'
+    # Logic: Extracting "Buy X Get Y" or "Single"
+    def parse_item_scheme(item_name):
+        item_name = str(item_name)
+        scheme = "一般單次"
+        main_item = item_name
         
+        # Keywords for schemes
+        schemes = ["買3送1", "買5送1", "買10送2", "體驗", "贈送", "包堂"]
+        for s in schemes:
+            if s in item_name:
+                scheme = s
+                # Try to remove scheme from name to get Main Item
+                main_item = item_name.replace(s, "").replace("買", "").strip()
+                break
+        
+        return pd.Series([main_item, scheme])
+
+    if '品項' in df.columns:
+        df[['主項目', '銷售方案']] = df['品項'].apply(parse_item_scheme)
+    else:
+        df['主項目'] = 'Unknown'
+        df['銷售方案'] = 'Unknown'
+
+    # (E) Real Cash Correction
+    # Logic: If Payment is 'Coupon'/'Voucher', Cash is 0? 
+    # Or rely on '定價/實收' column if parsed. 
+    # For now, simplistic logic: if '券' in payment method, Real Cash = 0, else Total Price
+    def calc_real_cash(row):
+        pay_method = str(row.get('支付方式', ''))
+        total = row.get('總價', 0)
+        
+        if '商品券' in pay_method or '贈送' in pay_method:
+            return 0
+        return total
+
+    df['現金實收(修正)'] = df.apply(calc_real_cash, axis=1)
+    df['實收金額'] = df['總價'] # Reuse total price as base revenue
+
+    # (F) Customer Status (Active/Lost) & Last Visit
+    latest_visit = df.groupby('會員ID')['訂單時間'].max().reset_index()
+    latest_visit.columns = ['會員ID', '最後到店']
+    df = df.merge(latest_visit, on='會員ID', how='left')
+    
+    today = pd.Timestamp.now()
+    df['未到店天數'] = (today - df['最後到店']).dt.days
+    
+    def get_status(days):
+        if days > 120: return "🔴 已流失 (>120天)"
+        elif days > 60: return "🟡 沉睡中 (60-120天)"
+        else: return "🟢 活躍中"
+        
+    df['客群狀態'] = df['未到店天數'].apply(get_status)
+
+    # (G) Category Mapping (Simple Heuristic for now)
+    # Mapping '分類' to '大分類' based on user image examples
+    def map_category(cat):
+        cat = str(cat)
+        if "臉部" in cat or "皮膚" in cat or "儲值" in cat: return "01. 臉部皮膚管理"
+        if "除毛" in cat: return "02. 專業除毛專科"
+        if "美齒" in cat: return "04. 淨白美齒SPA"
+        return "99. 其他"
+
+    if '分類' in df.columns:
+        df['大分類'] = df['分類'].apply(map_category)
+    else:
+        df['大分類'] = '99. 其他'
+
     return df
 
 @st.cache_data
@@ -223,6 +308,32 @@ def main():
         raw_df = load_data(uploaded_files)
         df = preprocess_data(raw_df)
         
+        # --- Cleaned Data Preview ---
+        with st.expander("📋 查看資料清洗結果 (Data Cleaning Preview)", expanded=False):
+            st.caption("系統已自動將原始資料清洗為分析專用格式：")
+            
+            # Select columns to show based on user request
+            show_cols = [
+                '會員ID', '消費日期', '品項', '主項目', '銷售方案', 
+                '第幾次來', '年度總次數', 
+                '實收金額', '現金實收(修正)', 
+                '客群狀態', '未到店天數', '大分類'
+            ]
+            # Filter cols that actually exist
+            show_cols = [c for c in show_cols if c in df.columns]
+            
+            st.dataframe(df[show_cols].head(100), use_container_width=True)
+            
+            # Download Button
+            csv = df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                "📥 下載清洗後的完整資料 (CSV)",
+                csv,
+                "cleaned_crm_data.csv",
+                "text/csv",
+                key='download-csv'
+            )
+
         # Global Filters
         years = sorted(df['年份'].unique().tolist(), reverse=True)
         
@@ -325,6 +436,7 @@ def main():
     # 4. Products (BCG)
     with tabs[3]:
         st.subheader("🛍️ 產品波士頓矩陣")
+        st.caption("協助您識別明星商品與潛力股")
         
         if '品項' in df_filtered.columns:
             prod_stats = df_filtered.groupby('品項').agg({
@@ -333,25 +445,69 @@ def main():
             }).reset_index()
             prod_stats.columns = ['品項', '銷量', '營收']
             
-            sales_med = prod_stats['銷量'].median()
-            rev_med = prod_stats['營收'].median()
+            # --- Cleaning & Controls ---
+            c1, c2 = st.columns(2)
+            with c1:
+                min_orders = st.slider("過濾低銷量雜訊 (最少訂單數)", 1, 50, 3, help="排除訂單數過少的商品，讓圖表更清晰")
+            with c2:
+                label_mode = st.radio("標籤顯示模式", ["重點顯示 (Top 20)", "全部顯示", "不顯示"], horizontal=True)
+
+            # Filter noise
+            prod_stats_clean = prod_stats[prod_stats['銷量'] >= min_orders].copy()
             
-            prod_stats['Type'] = prod_stats.apply(
-                lambda x: '⭐ 明星' if (x['銷量']>=sales_med and x['營收']>=rev_med) else
-                          ('🐔 金牛/帶路' if x['銷量']>=sales_med else
-                           ('💎 問題/潛力' if x['營收']>=rev_med else '🐕 瘦狗')), axis=1
-            )
+            # Calculate medians based on CLEAN data
+            sales_med = prod_stats_clean['銷量'].median()
+            rev_med = prod_stats_clean['營收'].median()
             
+            # Classification
+            def classify(row):
+                if row['銷量'] >= sales_med and row['營收'] >= rev_med:
+                    return '⭐ 明星'
+                elif row['銷量'] >= sales_med:
+                    return '🐔 金牛'
+                elif row['營收'] >= rev_med:
+                    return '💎 潛力'
+                else:
+                    return '🐕 瘦狗'
+            
+            prod_stats_clean['Type'] = prod_stats_clean.apply(classify, axis=1)
+            
+            # Truncate names for display
+            prod_stats_clean['ShortName'] = prod_stats_clean['品項'].apply(lambda x: x[:10] + '...' if len(str(x)) > 10 else str(x))
+            
+            # Determine which labels to show
+            if label_mode == "全部顯示":
+                prod_stats_clean['Label'] = prod_stats_clean['ShortName']
+            elif label_mode == "重點顯示 (Top 20)":
+                # Prioritize high revenue items
+                top_items = prod_stats_clean.nlargest(20, '營收')['品項'].tolist()
+                prod_stats_clean['Label'] = prod_stats_clean.apply(lambda x: x['ShortName'] if x['品項'] in top_items else "", axis=1)
+            else:
+                prod_stats_clean['Label'] = ""
+
+            # Plot
             fig_bcg = px.scatter(
-                prod_stats, x='銷量', y='營收', color='Type', 
-                hover_data=['品項'], text='品項',
-                color_discrete_map={'⭐ 明星': '#00b894', '🐔 金牛/帶路': '#0984e3', '💎 問題/潛力': '#fdcb6e', '🐕 瘦狗': '#b2bec3'}
+                prod_stats_clean, 
+                x='銷量', 
+                y='營收', 
+                color='Type', 
+                hover_data=['品項', '銷量', '營收'], 
+                text='Label',
+                title=f'產品分布圖 (共 {len(prod_stats_clean)} 項商品)',
+                color_discrete_map={'⭐ 明星': '#00b894', '🐔 金牛': '#0984e3', '💎 潛力': '#fdcb6e', '🐕 瘦狗': '#b2bec3'}
             )
-            fig_bcg.update_traces(textposition='top center')
-            fig_bcg.add_hline(y=rev_med, line_dash="dash", annotation_text="營收中位數")
-            fig_bcg.add_vline(x=sales_med, line_dash="dash", annotation_text="銷量中位數")
             
+            fig_bcg.update_traces(textposition='top center', marker=dict(size=10, opacity=0.8, line=dict(width=1, color='White')))
+            fig_bcg.add_hline(y=rev_med, line_dash="dash", line_color="gray", annotation_text="營收中位數")
+            fig_bcg.add_vline(x=sales_med, line_dash="dash", line_color="gray", annotation_text="銷量中位數")
+            
+            fig_bcg.update_layout(height=600)
             st.plotly_chart(fig_bcg, use_container_width=True)
+            
+            # Data Table
+            with st.expander("查看詳細數據表"):
+                st.dataframe(prod_stats_clean.sort_values('營收', ascending=False), use_container_width=True)
+                
         else:
             st.error("缺少「品項」欄位")
 
