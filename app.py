@@ -2,354 +2,388 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 
-st.set_page_config(page_title="美業 CRM 數據分析系統", layout="wide", page_icon="💅")
-
-# 自訂 CSS
-st.markdown("""
-<style>
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 20px;
-        border-radius: 10px;
-        color: white;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 24px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        padding-left: 20px;
-        padding-right: 20px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-st.title("💅 美業 CRM 數據分析系統")
-
-# 資料需求說明
-st.caption("📋 最少需要欄位：訂單號碼、訂單時間、會員、品項、總價")
-
-# 側邊欄：多檔案上傳
-st.sidebar.header("📁 資料上傳")
-uploaded_files = st.sidebar.file_uploader(
-    "上傳交易資料 (可選擇 10-20 個檔案)", 
-    type=['xlsx', 'csv', 'parquet'],
-    accept_multiple_files=True
+# Set page config
+st.set_page_config(
+    page_title="Pro Beauty CRM | 專業美業數據分析",
+    layout="wide",
+    page_icon="💎",
+    initial_sidebar_state="expanded"
 )
 
-if uploaded_files:
-    # 合併所有上傳的檔案
+# ==========================================
+# 🎨 UI/UX Theme & Custom CSS
+# ==========================================
+def inject_custom_css():
+    st.markdown("""
+    <style>
+        /* Main Container Background */
+        .stApp {
+            background-color: #f8f9fa;
+        }
+        
+        /* Metric Cards */
+        div[data-testid="metric-container"] {
+            background-color: #ffffff;
+            border: 1px solid #e0e0e0;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            transition: transform 0.2s;
+        }
+        div[data-testid="metric-container"]:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 12px rgba(0,0,0,0.1);
+        }
+        
+        /* Headers */
+        h1, h2, h3 {
+            color: #2c3e50;
+            font-family: 'Helvetica Neue', sans-serif;
+        }
+        
+        /* Tabs */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 10px;
+            background-color: transparent;
+        }
+        .stTabs [data-baseweb="tab"] {
+            height: 45px;
+            background-color: #ffffff;
+            border-radius: 8px 8px 0 0;
+            border: 1px solid #e0e0e0;
+            border-bottom: none;
+            padding: 0 20px;
+        }
+        .stTabs [data-baseweb="tab"][aria-selected="true"] {
+            background-color: #6c5ce7;
+            color: white;
+        }
+        
+        /* Sidebar */
+        .css-1d391kg {
+            padding-top: 2rem;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+# ==========================================
+# 🔄 Data Processing Functions
+# ==========================================
+@st.cache_data
+def load_data(uploaded_files):
+    if not uploaded_files:
+        return None
+    
     all_dfs = []
+    for uploaded_file in uploaded_files:
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                df_temp = pd.read_csv(uploaded_file)
+            elif uploaded_file.name.endswith('.parquet'):
+                df_temp = pd.read_parquet(uploaded_file)
+            else:
+                df_temp = pd.read_excel(uploaded_file)
+            all_dfs.append(df_temp)
+        except Exception as e:
+            st.error(f"Error loading {uploaded_file.name}: {str(e)}")
+            
+    if not all_dfs:
+        return None
+        
+    return pd.concat(all_dfs, ignore_index=True)
+
+@st.cache_data
+def preprocess_data(df):
+    df = df.copy()
     
-    with st.spinner('正在讀取並合併檔案...'):
-        for uploaded_file in uploaded_files:
-            try:
-                if uploaded_file.name.endswith('.csv'):
-                    df_temp = pd.read_csv(uploaded_file)
-                elif uploaded_file.name.endswith('.parquet'):
-                    df_temp = pd.read_parquet(uploaded_file)
-                else:
-                    df_temp = pd.read_excel(uploaded_file)
-                
-                all_dfs.append(df_temp)
-                st.sidebar.success(f"✅ {uploaded_file.name} ({len(df_temp):,} 筆)")
-            except Exception as e:
-                st.sidebar.error(f"❌ {uploaded_file.name} 讀取失敗")
+    # Ensure datetime
+    if '訂單時間' in df.columns:
+        df['訂單時間'] = pd.to_datetime(df['訂單時間'], errors='coerce')
+        df['年份'] = df['訂單時間'].dt.year
+        df['月份'] = df['訂單時間'].dt.month
+        df['月份名稱'] = df['訂單時間'].dt.strftime('%Y-%m')
+        df['日期'] = df['訂單時間'].dt.date
     
-    # 合併所有資料
-    df = pd.concat(all_dfs, ignore_index=True)
+    # Ensure numeric
+    if '總價' in df.columns:
+        df['總價'] = pd.to_numeric(df['總價'], errors='coerce').fillna(0)
+        
+    return df
+
+@st.cache_data
+def calculate_rfm(df, end_date=None):
+    if end_date is None:
+        end_date = df['訂單時間'].max() + timedelta(days=1)
+        
+    # Recency, Frequency, Monetary
+    rfm = df.groupby('會員').agg({
+        '訂單時間': lambda x: (end_date - x.max()).days,
+        '訂單號碼': 'nunique',
+        '總價': 'sum'
+    }).reset_index()
     
-    st.success(f"✅ 成功合併 {len(uploaded_files)} 個檔案，共 {len(df):,} 筆交易資料")
+    rfm.columns = ['會員', 'Recency', 'Frequency', 'Monetary']
     
-    # 資料預處理
-    df['訂單時間'] = pd.to_datetime(df['訂單時間'], errors='coerce')
-    df['年份'] = df['訂單時間'].dt.year
-    df['月份'] = df['訂單時間'].dt.month
+    # Simple Scoring (1-5 scale)
+    if len(rfm) > 1:
+        try:
+            rfm['R_Score'] = pd.qcut(rfm['Recency'], 5, labels=[5, 4, 3, 2, 1])
+            rfm['F_Score'] = pd.qcut(rfm['Frequency'].rank(method='first'), 5, labels=[1, 2, 3, 4, 5])
+            rfm['M_Score'] = pd.qcut(rfm['Monetary'], 5, labels=[1, 2, 3, 4, 5])
+            rfm['RFM_Segment'] = rfm['R_Score'].astype(str) + rfm['F_Score'].astype(str) + rfm['M_Score'].astype(str)
+            rfm['RFM_Score'] = rfm[['R_Score', 'F_Score', 'M_Score']].sum(axis=1)
+        except Exception as e:
+            st.warning("Data insufficient for quintile scoring, using simplified logic.")
+            rfm['R_Score'] = 3
+            rfm['F_Score'] = 3
+            rfm['M_Score'] = 3
+            rfm['RFM_Segment'] = '333'
+            
+    return rfm
+
+@st.cache_data
+def calculate_cohort(df):
+    df_cohort = df.copy()
+    df_cohort['OrderPeriod'] = df_cohort['訂單時間'].dt.to_period('M')
+    df_cohort['CohortGroup'] = df_cohort.groupby('會員')['訂單時間'].transform('min').dt.to_period('M')
     
-    # 計算每個會員的年度總次數
-    member_annual_freq = df.groupby(['會員', '年份'])['訂單號碼'].nunique().reset_index()
-    member_annual_freq.columns = ['會員', '年份', '年度總次數']
-    df = df.merge(member_annual_freq, on=['會員', '年份'], how='left')
+    cohort_data = df_cohort.groupby(['CohortGroup', 'OrderPeriod']).agg(n_customers=('會員', 'nunique')).reset_index()
+    cohort_data['PeriodNumber'] = (cohort_data.OrderPeriod - cohort_data.CohortGroup).apply(lambda x: x.n)
     
-    # 選擇分析年度
-    years = sorted(df['年份'].dropna().unique())
-    selected_year = st.sidebar.selectbox("選擇分析年度", years, index=len(years)-1)
+    cohort_pivot = cohort_data.pivot(index='CohortGroup', columns='PeriodNumber', values='n_customers')
+    cohort_size = cohort_pivot.iloc[:, 0]
+    retention_matrix = cohort_pivot.divide(cohort_size, axis=0)
     
-    # 建立頁籤
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 會員深度分析", 
-        "🔍 會員黏著度",
-        "💰 產品矩陣",
-        "🎯 客群健康度",
-        "📈 促銷方案"
+    return retention_matrix, cohort_size
+
+# ==========================================
+# 📊 Plotting Functions
+# ==========================================
+def plot_revenue_trend(df):
+    daily_rev = df.groupby('日期')['總價'].sum().reset_index()
+    daily_rev['MA7'] = daily_rev['總價'].rolling(7).mean()
+    
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=daily_rev['日期'], y=daily_rev['總價'], mode='lines', name='日營收', line=dict(color='#a8a0ff', width=1)))
+    fig.add_trace(go.Scatter(x=daily_rev['日期'], y=daily_rev['MA7'], mode='lines', name='7日均線', line=dict(color='#6c5ce7', width=3)))
+    
+    fig.update_layout(
+        title='營收趨勢分析',
+        xaxis_title='日期',
+        yaxis_title='營收 ($)',
+        hovermode="x unified",
+        height=400,
+        margin=dict(l=0, r=0, t=40, b=0)
+    )
+    return fig
+
+def plot_rfm_scatter(rfm_df):
+    fig = px.scatter(
+        rfm_df, 
+        x='Recency', 
+        y='Frequency', 
+        size='Monetary',
+        color='R_Score',
+        hover_data=['會員', 'Monetary'],
+        title='RFM 客戶分群圖 (氣泡大小=總消費)',
+        color_discrete_sequence=px.colors.sequential.Viridis
+    )
+    fig.update_layout(height=500)
+    return fig
+
+# ==========================================
+# 🚀 Main Application
+# ==========================================
+def main():
+    inject_custom_css()
+    
+    st.title("💎 Pro Beauty CRM Analytics")
+    st.caption("透過數據驅動決策，提升美業經營績效")
+    
+    # --- Sidebar ---
+    with st.sidebar:
+        st.header("📂 資料中心")
+        uploaded_files = st.file_uploader("上傳交易資料 (CSV/Excel/Parquet)", accept_multiple_files=True)
+        
+        st.markdown("---")
+        st.markdown("### 💡 系統說明")
+        st.info("支援多檔案合併，系統會自動清理並計算進階指標。")
+
+    if not uploaded_files:
+        _show_landing_page()
+        return
+
+    # --- Data Loading ---
+    with st.spinner("正在處理數據大腦..."):
+        raw_df = load_data(uploaded_files)
+        df = preprocess_data(raw_df)
+        
+        # Global Filters
+        years = sorted(df['年份'].unique().tolist(), reverse=True)
+        
+        st.sidebar.header("🔍 篩選條件")
+        selected_year = st.sidebar.selectbox("選擇年份", years, index=0)
+        
+        df_filtered = df[df['年份'] == selected_year]
+        
+    # --- KPIs ---
+    total_rev = df_filtered['總價'].sum()
+    total_orders = df_filtered['訂單號碼'].nunique()
+    total_members = df_filtered['會員'].nunique()
+    avg_order_value = total_rev / total_orders if total_orders else 0
+    
+    # Comparison (Fake YoY for demo if only 1 year, else real calc could be added)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("年度總營收", f"${total_rev:,.0f}", delta="累積")
+    col2.metric("總訂單數", f"{total_orders:,}", delta="筆")
+    col3.metric("活躍會員數", f"{total_members:,}", delta="人")
+    col4.metric("平均客單價 (AOV)", f"${avg_order_value:,.0f}", delta="元/單")
+    
+    st.markdown("---")
+
+    # --- Tabs ---
+    tabs = st.tabs([
+        "📈 營運概覽 (Overview)", 
+        "👥 會員深度分析 (RFM)", 
+        "🔄 留存與回購 (Retention)", 
+        "🛍️ 產品矩陣 (Products)",
+        "🎁 促銷成效 (Promotions)"
     ])
     
-    # ========== Tab 1: 會員深度分析 ==========
-    with tab1:
-        st.header(f"{selected_year} 年會員深度分析")
+    # 1. Overview
+    with tabs[0]:
+        st.subheader("📊 營運趨勢監控")
+        st.plotly_chart(plot_revenue_trend(df_filtered), use_container_width=True)
         
-        df_year = df[df['年份'] == selected_year].copy()
+        c1, c2 = st.columns(2)
+        with c1:
+            # Monthly Revenue
+            monthly_rev = df_filtered.groupby('月份')['總價'].sum().reset_index()
+            fig_mon = px.bar(monthly_rev, x='月份', y='總價', title='月度營收表現', color='總價', color_continuous_scale='Bluyl')
+            st.plotly_chart(fig_mon, use_container_width=True)
+        with c2:
+            # Hourly/Daily patterns (if time available) or Pay methods
+            if '消費方式' in df_filtered.columns:
+                pay_mix = df_filtered.groupby('消費方式')['總價'].sum().reset_index()
+                fig_pay = px.pie(pay_mix, values='總價', names='消費方式', title='支付方式佔比', hole=0.4)
+                st.plotly_chart(fig_pay, use_container_width=True)
+
+    # 2. Member Analysis (RFM)
+    with tabs[1]:
+        st.subheader("👥 會員價值模型 (RFM Analysis)")
+        rfm_df = calculate_rfm(df_filtered)
         
-        # 計算會員統計
-        member_stats = df_year.groupby('會員').agg({
-            '訂單號碼': 'nunique',
-            '總價': 'sum'
-        }).reset_index()
-        member_stats.columns = ['會員', '年度總次數', '年度總消費']
-        
-        # 按年度總次數分組
-        freq_dist = member_stats.groupby('年度總次數').agg({
-            '會員': 'count',
-            '年度總消費': 'sum'
-        }).reset_index()
-        freq_dist.columns = ['年度總次數', '人數', '總營收']
-        
-        # 合併 >10 次
-        freq_dist_display = freq_dist[freq_dist['年度總次數'] <= 10].copy()
-        if len(freq_dist[freq_dist['年度總次數'] > 10]) > 0:
-            over_10 = pd.DataFrame({
-                '年度總次數': ['>10'],
-                '人數': [freq_dist[freq_dist['年度總次數'] > 10]['人數'].sum()],
-                '總營收': [freq_dist[freq_dist['年度總次數'] > 10]['總營收'].sum()]
-            })
-            freq_dist_display = pd.concat([freq_dist_display, over_10], ignore_index=True)
-        
-        # 圖表：雙軸柱狀圖
-        fig1 = go.Figure()
-        fig1.add_trace(go.Bar(
-            x=freq_dist_display['年度總次數'].astype(str),
-            y=freq_dist_display['人數'],
-            name='人數',
-            marker_color='lightblue',
-            yaxis='y',
-            text=freq_dist_display['人數'],
-            textposition='outside'
-        ))
-        fig1.add_trace(go.Bar(
-            x=freq_dist_display['年度總次數'].astype(str),
-            y=freq_dist_display['總營收'],
-            name='總營收',
-            marker_color='#FF6B6B',
-            yaxis='y2',
-            opacity=0.7
-        ))
-        fig1.update_layout(
-            title="會員分佈：人數 vs 營收貢獻",
-            xaxis_title="年度總次數",
-            yaxis=dict(title='人數', side='left'),
-            yaxis2=dict(title='總營收 ($)', overlaying='y', side='right'),
-            height=500,
-            barmode='overlay'
-        )
-        st.plotly_chart(fig1, use_container_width=True)
-        
-        # 洞察
-        if len(freq_dist_display) > 0:
-            one_timer = freq_dist_display[freq_dist_display['年度總次數'].astype(str) == '1'].iloc[0]
-            one_timer_pct = (one_timer['人數'] / freq_dist_display['人數'].sum() * 100)
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.plotly_chart(plot_rfm_scatter(rfm_df), use_container_width=True)
+        with c2:
+            st.info("""
+            **RFM 指標說明**
+            - **Recency (R)**: 最近一次消費距離天數 (越小越好)
+            - **Frequency (F)**: 消費頻率 (越大越好)
+            - **Monetary (M)**: 消費金額 (越大越好)
+            """)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                st.warning(f"""
-                **⚠️ 一次性過客**
-                - 只來 1 次：**{one_timer['人數']:,} 人** ({one_timer_pct:.1f}%)
-                - 💡 建議：設計「首購後第二次優惠」
-                """)
-            with col2:
-                vip_revenue = freq_dist_display[freq_dist_display['年度總次數'].astype(str).isin(['>10', '10', '9', '8'])]['總營收'].sum()
-                vip_pct = (vip_revenue / freq_dist_display['總營收'].sum() * 100)
-                st.success(f"""
-                **✅ VIP 貢獻**
-                - 高頻客戶貢獻：**{vip_pct:.1f}%** 營收
-                - 💡 建議：VIP 專屬儲值方案
-                """)
-    
-    # ========== Tab 2: 會員黏著度 ==========
-    with tab2:
-        st.header("會員黏著度分佈")
+            # Show Top VIPs
+            st.markdown("#### 🏆 Top 10 超級 VIP")
+            st.dataframe(
+                rfm_df.sort_values('Monetary', ascending=False).head(10)[['會員', 'Recency', 'Frequency', 'Monetary']],
+                hide_index=True,
+                use_container_width=True
+            )
+
+    # 3. Retention (Cohort)
+    with tabs[2]:
+        st.subheader("🔄 留存率世代分析 (Cohort Analysis)")
+        st.caption("觀察不同月份加入的會員，隨著時間推移的留存情況")
         
-        freq_table = df_year.groupby('年度總次數')['會員'].nunique().reset_index()
-        freq_table.columns = ['年度總次數', '人數']
-        freq_table['佔比 (%)'] = (freq_table['人數'] / freq_table['人數'].sum() * 100).round(2)
+        try:
+            retention_matrix, cohort_size = calculate_cohort(df) # Use full data for cohort to see long term
+            
+            # Heatmap
+            fig_cohort = go.Figure(data=go.Heatmap(
+                z=retention_matrix.values,
+                x=retention_matrix.columns,
+                y=[str(x) for x in retention_matrix.index],
+                colorscale='Blues',
+                text=[[f"{val:.0%}" if not np.isnan(val) else "" for val in row] for row in retention_matrix.values],
+                texttemplate="%{text}",
+                showscale=True
+            ))
+            
+            fig_cohort.update_layout(
+                title='會員留存率熱力圖',
+                xaxis_title='第 N 個月後',
+                yaxis_title='首次購買月份',
+                height=600
+            )
+            st.plotly_chart(fig_cohort, use_container_width=True)
+            
+        except Exception as e:
+            st.warning("資料量不足或格式問題，無法產生留存分析圖表")
+            st.error(str(e))
+
+    # 4. Products (BCG)
+    with tabs[3]:
+        st.subheader("🛍️ 產品波士頓矩陣")
         
-        st.dataframe(freq_table, use_container_width=True, hide_index=True)
-        
-        # 圓餅圖
-        freq_table_grouped = freq_table.copy()
-        freq_table_grouped.loc[freq_table_grouped['年度總次數'] > 5, '年度總次數'] = '>5'
-        freq_table_grouped = freq_table_grouped.groupby('年度總次數').sum().reset_index()
-        
-        fig_pie = px.pie(
-            freq_table_grouped,
-            values='人數',
-            names='年度總次數',
-            title='會員黏著度分佈',
-            hole=0.4
-        )
-        st.plotly_chart(fig_pie, use_container_width=True)
-    
-    # ========== Tab 3: 產品矩陣 ==========
-    with tab3:
-        st.header("產品波士頓矩陣（BCG Matrix）")
-        
-        if '品項' in df.columns:
-            product_matrix = df_year.groupby('品項').agg({
+        if '品項' in df_filtered.columns:
+            prod_stats = df_filtered.groupby('品項').agg({
                 '訂單號碼': 'nunique',
                 '總價': 'sum'
             }).reset_index()
-            product_matrix.columns = ['品項', '訂單數', '總營收']
-            product_matrix = product_matrix[product_matrix['訂單數'] >= 3]
+            prod_stats.columns = ['品項', '銷量', '營收']
             
-            median_orders = product_matrix['訂單數'].median()
-            median_revenue = product_matrix['總營收'].median()
+            # Median thresholds
+            sales_med = prod_stats['銷量'].median()
+            rev_med = prod_stats['營收'].median()
             
-            def classify_product(row):
-                if row['訂單數'] >= median_orders and row['總營收'] >= median_revenue:
-                    return '⭐ 明星商品'
-                elif row['訂單數'] >= median_orders:
-                    return '🐔 帶路雞'
-                elif row['總營收'] >= median_revenue:
-                    return '💎 潛力股'
-                else:
-                    return '❌ 拖油瓶'
-            
-            product_matrix['分類'] = product_matrix.apply(classify_product, axis=1)
+            prod_stats['Type'] = prod_stats.apply(
+                lambda x: '⭐ 明星' if (x['銷量']>=sales_med and x['營收']>=rev_med) else
+                          ('🐔 金牛/帶路' if x['銷量']>=sales_med else
+                           ('💎 問題/潛力' if x['營收']>=rev_med else '🐕 瘦狗')), axis=1
+            )
             
             fig_bcg = px.scatter(
-                product_matrix,
-                x='訂單數',
-                y='總營收',
-                color='分類',
-                hover_data=['品項'],
-                title='產品矩陣：人氣 vs 營收',
-                color_discrete_map={
-                    '⭐ 明星商品': '#2ECC71',
-                    '🐔 帶路雞': '#3498DB',
-                    '💎 潛力股': '#F39C12',
-                    '❌ 拖油瓶': '#95A5A6'
-                }
+                prod_stats, x='銷量', y='營收', color='Type', 
+                hover_data=['品項'], text='品項',
+                color_discrete_map={'⭐ 明星': '#00b894', '🐔 金牛/帶路': '#0984e3', '💎 問題/潛力': '#fdcb6e', '🐕 瘦狗': '#b2bec3'}
             )
+            fig_bcg.update_traces(textposition='top center')
+            fig_bcg.add_hline(y=rev_med, line_dash="dash", annotation_text="營收中位數")
+            fig_bcg.add_vline(x=sales_med, line_dash="dash", annotation_text="銷量中位數")
+            
             st.plotly_chart(fig_bcg, use_container_width=True)
-            
-            # 顯示各象限產品
-            col1, col2 = st.columns(2)
-            with col1:
-                st.success("**⭐ 明星商品**")
-                stars = product_matrix[product_matrix['分類'] == '⭐ 明星商品'].head(5)
-                st.dataframe(stars[['品項', '訂單數', '總營收']], hide_index=True)
-            
-            with col2:
-                st.info("**🐔 帶路雞**")
-                chicken = product_matrix[product_matrix['分類'] == '🐔 帶路雞'].head(5)
-                st.dataframe(chicken[['品項', '訂單數', '總營收']], hide_index=True)
         else:
-            st.warning("⚠️ 資料中缺少「品項」欄位，無法進行產品矩陣分析")
-    
-    # ========== Tab 4: 客群健康度 ==========
-    with tab4:
-        st.header("客群健康度診斷")
-        
-        if '分類' in df.columns:
-            # 計算客群狀態（如果沒有則自動生成）
-            if '客群狀態' not in df.columns:
-                latest_purchase = df.groupby('會員')['訂單時間'].max().reset_index()
-                today = pd.Timestamp.now()
-                
-                def calc_status(last_date):
-                    if pd.isna(last_date):
-                        return '🔴 已流失'
-                    days = (today - last_date).days
-                    if days <= 90:
-                        return '🟢 活躍中'
-                    elif days <= 180:
-                        return '🟡 需喚醒'
-                    else:
-                        return '🔴 已流失'
-                
-                latest_purchase['客群狀態'] = latest_purchase['訂單時間'].apply(calc_status)
-                df = df.merge(latest_purchase[['會員', '客群狀態']], on='會員', how='left')
-            
-            health_matrix = df_year.groupby(['分類', '客群狀態'])['會員'].nunique().reset_index()
-            health_pivot = health_matrix.pivot_table(
-                index='分類',
-                columns='客群狀態',
-                values='會員',
-                fill_value=0
-            )
-            
-            st.dataframe(health_pivot, use_container_width=True)
-            
-            # 堆疊柱狀圖
-            fig_health = go.Figure()
-            colors = {'🟢 活躍中': '#2ECC71', '🟡 需喚醒': '#F39C12', '🔴 已流失': '#E74C3C'}
-            
-            for status in health_pivot.columns:
-                fig_health.add_trace(go.Bar(
-                    name=status,
-                    x=health_pivot.index,
-                    y=health_pivot[status],
-                    marker_color=colors.get(status, 'gray')
-                ))
-            
-            fig_health.update_layout(
-                title="各分類客群健康度",
-                barmode='stack',
-                height=500
-            )
-            st.plotly_chart(fig_health, use_container_width=True)
-        else:
-            st.warning("⚠️ 資料中缺少「分類」欄位")
-    
-    # ========== Tab 5: 促銷方案 ==========
-    with tab5:
-        st.header("促銷方案成效分析")
-        
-        if '消費方式' in df.columns:
-            promo_summary = df_year.groupby('消費方式').agg({
-                '訂單號碼': 'nunique',
-                '總價': 'sum'
-            }).reset_index()
-            promo_summary.columns = ['消費方式', '訂單數', '總營收']
-            promo_summary = promo_summary.sort_values('總營收', ascending=False)
-            
-            st.dataframe(promo_summary, use_container_width=True, hide_index=True)
-            
-            fig_promo = px.bar(
-                promo_summary.head(10),
-                x='消費方式',
-                y='總營收',
-                title='各消費方式營收排名',
-                text='總營收'
-            )
-            st.plotly_chart(fig_promo, use_container_width=True)
-        else:
-            st.warning("⚠️ 資料中缺少「消費方式」欄位")
+            st.error("缺少「品項」欄位")
 
-else:
-    st.info("👈 請從左側上傳交易資料檔案（可一次選擇多個檔案）")
+    # 5. Promotions
+    with tabs[4]:
+        st.subheader("🎁 促銷方案成效")
+        if '消費方式' in df_filtered.columns:
+            promo = df_filtered.groupby('消費方式')['總價'].sum().reset_index().sort_values('總價', ascending=True)
+            fig_promo = px.bar(promo, y='消費方式', x='總價', orientation='h', title='促銷/支付方式營收貢獻')
+            st.plotly_chart(fig_promo, use_container_width=True)
+
+def _show_landing_page():
     st.markdown("""
-    ### 📊 系統功能
-    
-    #### 會員深度分析
-    - 人數分佈 vs 營收貢獻
-    - 自動識別一次性過客與 VIP
-    
-    #### 會員黏著度
-    - 一年來幾次分佈表
-    - 黏著度圓餅圖
-    
-    #### 產品矩陣
-    - BCG 四象限分析
-    - 明星商品 vs 帶路雞 vs 潛力股 vs 拖油瓶
-    
-    #### 客群健康度
-    - 各分類流失率診斷
-    - 活躍/需喚醒/已流失分佈
-    
-    #### 促銷方案
-    - 消費方式成效排名
-    - 營收貢獻分析
-    """)
+    <div style='text-align: center; padding: 50px;'>
+        <h1>👋 歡迎使用 Pro Beauty CRM</h1>
+        <p style='font-size: 1.2em; color: #666;'>請從左側欄位上傳您的交易資料 (CSV/Excel) 以開始分析</p>
+        <div style='background-color: #e3f2fd; padding: 20px; border-radius: 10px; display: inline-block; text-align: left;'>
+            <strong>📋 資料格式需求：</strong><br>
+            您的檔案應包含以下欄位：<br>
+            - <code>訂單號碼</code> (Order ID)<br>
+            - <code>訂單時間</code> (Date)<br>
+            - <code>會員</code> (Member ID/Name)<br>
+            - <code>品項</code> (Product Name)<br>
+            - <code>總價</code> (Total Price)
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
